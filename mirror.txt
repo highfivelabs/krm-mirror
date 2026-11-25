@@ -1,0 +1,6 @@
+# Paths under us-central1-docker.pkg.dev/highfivelabs-prd/krm to copy to
+# ghcr.io/highfivelabs/krm, one per line. Managed by tf-infra
+# (terragrunt/prod/github/files/krm-mirror); change it there, not here.
+charts/config-connector
+upstream/config-connector/operator
+upstream/kubernetes/kubectl
