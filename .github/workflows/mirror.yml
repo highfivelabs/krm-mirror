@@ -1,0 +1,140 @@
+# Copies every tag of each path in mirror.txt from Artifact Registry
+# (us-central1-docker.pkg.dev/highfivelabs-prd/krm, read anonymously) to
+# ghcr.io/highfivelabs/krm, by digest. A tag already on ghcr.io with another
+# digest fails the run and is never overwritten.
+#
+# Managed by tf-infra (terragrunt/prod/github/files/krm-mirror); change it
+# there, not here.
+name: mirror
+
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    name: Mirror to ghcr.io
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read # check out mirror.txt
+      packages: write # push to ghcr.io/highfivelabs/krm
+    env:
+      SOURCE: us-central1-docker.pkg.dev/highfivelabs-prd/krm
+      DEST: ghcr.io/highfivelabs/krm
+      CRANE_VERSION: v0.22.1
+      CRANE_SHA256: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
+    steps:
+      - name: Check out mirror.txt
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install crane
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sSfL -o "$RUNNER_TEMP/crane.tgz" \
+            "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
+          echo "${CRANE_SHA256}  $RUNNER_TEMP/crane.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/crane.tgz" -C "$RUNNER_TEMP/bin" crane
+          "$RUNNER_TEMP/bin/crane" version
+
+      - name: Sign in to ghcr.io
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | "$RUNNER_TEMP/bin/crane" auth login ghcr.io -u "$ACTOR" --password-stdin
+
+      - name: Mirror
+        run: |
+          set -euo pipefail
+          crane="$RUNNER_TEMP/bin/crane"
+          errs="$RUNNER_TEMP/crane.err"
+          failed=0 copied=0 present=0
+
+          fail() { echo "::error title=$1::$2"; failed=1; }
+
+          # ghcr_tags PATH: its tags on ghcr.io; nothing when the package
+          # does not exist yet; status 1 otherwise (for example a package
+          # this repository's token may not write), the error in $errs.
+          # It runs in a subshell: it prints only tags.
+          ghcr_tags() {
+            local out
+            if out="$("$crane" ls "$DEST/$1" 2>"$errs")"; then
+              printf '%s\n' "$out"
+              return 0
+            fi
+            grep -qE 'NAME_UNKNOWN|404 Not Found' "$errs"
+          }
+
+          name_re='^[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*$'
+          while IFS= read -r line || [ -n "$line" ]; do
+            path="${line%%#*}"
+            path="${path//[[:space:]]/}"
+            [ -n "$path" ] || continue
+            if ! [[ "$path" =~ $name_re ]]; then
+              fail "mirror.txt" "not a repository path: $path"
+              continue
+            fi
+            src="$SOURCE/$path"
+            dst="$DEST/$path"
+            echo "::group::$path"
+
+            if ! src_tags="$("$crane" ls "$src" 2>"$errs")"; then
+              fail "Artifact Registry" "crane ls $src: $(tr '\n' ' ' <"$errs")"
+              echo "::endgroup::"
+              continue
+            fi
+            if ! dst_tags="$(ghcr_tags "$path")"; then
+              fail "ghcr.io" "crane ls $dst: $(tr '\n' ' ' <"$errs")"
+              echo "::endgroup::"
+              continue
+            fi
+
+            for tag in $src_tags; do
+              if ! want="$("$crane" digest "$src:$tag" 2>"$errs")"; then
+                fail "Artifact Registry" "crane digest $src:$tag: $(tr '\n' ' ' <"$errs")"
+                continue
+              fi
+              if grep -qxF -- "$tag" <<<"$dst_tags"; then
+                have="$("$crane" digest "$dst:$tag" 2>"$errs" || true)"
+                if [ "$have" != "$want" ]; then
+                  fail "Digest mismatch" "$dst:$tag is ${have:-unreadable}, but $src:$tag is $want. Not overwritten: fix it by hand."
+                else
+                  present=$((present + 1))
+                fi
+                continue
+              fi
+              echo "copy $src@$want -> $dst:$tag"
+              if ! "$crane" copy "$src@$want" "$dst:$tag"; then
+                fail "Copy failed" "$src@$want -> $dst:$tag"
+                continue
+              fi
+              have="$("$crane" digest "$dst:$tag" 2>"$errs" || true)"
+              if [ "$have" != "$want" ]; then
+                fail "Digest mismatch after copy" "$dst:$tag is ${have:-unreadable}, want $want"
+                continue
+              fi
+              copied=$((copied + 1))
+            done
+            echo "::endgroup::"
+          done <mirror.txt
+
+          {
+            echo "### krm mirror"
+            echo
+            echo "- copied: $copied"
+            echo "- already present, same digest: $present"
+            echo "- failed: $([ "$failed" = 0 ] && echo no || echo yes, see the errors above)"
+          } >>"$GITHUB_STEP_SUMMARY"
+          exit "$failed"
