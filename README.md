@@ -28,7 +28,9 @@ tag missing on ghcr.io, copies the artifact by digest with
 [crane](https://github.com/google/go-containerregistry), then checks that the
 digest on ghcr.io is the same. A tag that already exists on ghcr.io with a
 different digest fails the run and is never overwritten: release tags do not
-move.
+move. A path with no repository in Artifact Registry yet (listed ahead of its
+first publish, as each extension is) is reported as not published yet, not
+as a failure.
 
 The workflow runs on a schedule and by hand (`workflow_dispatch`) only, never
 on pull requests. It uses this repository's `GITHUB_TOKEN` with
