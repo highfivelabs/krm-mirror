@@ -60,7 +60,7 @@ jobs:
           set -euo pipefail
           crane="$RUNNER_TEMP/bin/crane"
           errs="$RUNNER_TEMP/crane.err"
-          failed=0 copied=0 present=0
+          failed=0 copied=0 present=0 unpublished=0
 
           fail() { echo "::error title=$1::$2"; failed=1; }
 
@@ -91,7 +91,14 @@ jobs:
             echo "::group::$path"
 
             if ! src_tags="$("$crane" ls "$src" 2>"$errs")"; then
-              fail "Artifact Registry" "crane ls $src: $(tr '\n' ' ' <"$errs")"
+              # Listed before its first publish (factory's extension job,
+              # HFL-733): nothing to copy yet, not a failure.
+              if grep -qE 'NAME_UNKNOWN|404 Not Found' "$errs"; then
+                echo "::notice title=Not published yet::$src has no repository yet"
+                unpublished=$((unpublished + 1))
+              else
+                fail "Artifact Registry" "crane ls $src: $(tr '\n' ' ' <"$errs")"
+              fi
               echo "::endgroup::"
               continue
             fi
@@ -135,6 +142,7 @@ jobs:
             echo
             echo "- copied: $copied"
             echo "- already present, same digest: $present"
+            echo "- listed, not published yet: $unpublished"
             echo "- failed: $([ "$failed" = 0 ] && echo no || echo yes, see the errors above)"
           } >>"$GITHUB_STEP_SUMMARY"
           exit "$failed"
